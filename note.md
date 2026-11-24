@@ -82,6 +82,48 @@ previous value:
 session.state["capital_result"] = capital_result
 ```
 
+## Use state values in an instruction with `{key}`
+
+Agent instructions can read session state directly with `{key}` placeholders.
+Use `{key?default}` to provide fallback text when the key is missing:
+
+```python
+root_agent = LlmAgent(
+    model="gemini-flash-latest",
+    name="personalized_greeter",
+    instruction="""
+    You are a friendly assistant.
+
+    User information:
+    - Name: {user_name?there}
+    - Preferred language: {user_language?English}
+    - Membership: {membership_tier?free}
+
+    {membership_tier?Your membership level is: {membership_tier}}
+
+    Greet the user warmly and offer assistance.
+    Respond in {user_language?English}.
+    """
+)
+```
+
+For example, if the session state contains:
+
+```python
+session.state["user_name"] = "Alex"
+session.state["user_language"] = "Spanish"
+session.state["membership_tier"] = "premium"
+```
+
+the instruction receives the user's name, language, and membership level.
+Missing values use the defaults: `there`, `English`, and `free`.
+
+- `{key}` inserts a required state value.
+- `{key?default}` inserts `default` when the state key is missing or empty.
+- Put state-dependent text in a block with
+  `{membership_tier?Your membership level is: {membership_tier}}` to include
+  that text only when `membership_tier` is available.
+
 ## Configure generation parameters
 
 Configure an agent's model behavior with `GenerateContentConfig`:
@@ -166,6 +208,203 @@ Planning configuration:
   tasks.
 
 ![Planning parameters explained](./planning_parameters.png)
+
+## Use `session.state` with `output_key`
+
+`output_key` saves the agent's final response in the session state. The current
+ADK session and runner APIs are asynchronous, so the example uses
+`create_session` and `run_async`:
+
+```python
+import asyncio
+
+from google.adk.agents import LlmAgent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+
+
+async def main() -> None:
+    agent = LlmAgent(
+        name="name_extractor",
+        model="gemini-flash-latest",
+        instruction="Extract the user's name. Return ONLY the name.",
+        output_key="user_name",
+    )
+
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(
+        app_name="my_app",
+        user_id="user1",
+    )
+    runner = Runner(
+        agent=agent,
+        app_name="my_app",
+        session_service=session_service,
+    )
+
+    message = types.Content(
+        role="user",
+        parts=[types.Part(text="My name is Alex")],
+    )
+    async for event in runner.run_async(
+        user_id="user1",
+        session_id=session.id,
+        new_message=message,
+    ):
+        if event.is_final_response() and event.content:
+            print(event.content.parts[0].text)
+
+    # output_key stores the final response in the session state.
+    print(session.state)
+    print(session.state.get("user_name"))
+
+    if session.state.get("user_name"):
+        print("User has provided their name!")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Example: make a decision from saved state
+
+The agent can classify a support request and save the classification in state.
+The application then reads that state and chooses the next action:
+
+```python
+support_agent = LlmAgent(
+    name="support_classifier",
+    model="gemini-flash-latest",
+    instruction=(
+        "Classify the request as urgent, resolved, or needs_review. "
+        "Return exactly one of those three words."
+    ),
+    output_key="classification",
+)
+
+# Run the agent, then inspect the value saved by output_key.
+result = (session.state.get("classification") or "").strip().lower()
+
+if result == "urgent":
+    print("Escalate the request to the on-call team.")
+elif result == "resolved":
+    print("Close the request and send a confirmation.")
+elif result == "needs_review":
+    print("Route the request to a support specialist.")
+else:
+    print("The classification is missing or invalid; ask for human review.")
+```
+
+This pattern keeps the model responsible for producing a result and the
+application responsible for deciding what to do with that result.
+
+Install the dependency with:
+
+```powershell
+pip install google-adk
+```
+
+`google-adk` provides the ADK classes and installs compatible `google-genai`
+and `pydantic` dependencies. Set `GOOGLE_API_KEY` before running the example:
+
+```powershell
+$env:GOOGLE_API_KEY = "your-api-key"
+python state_demo.py
+```
+
+`InMemorySessionService` is suitable for local development and testing. For
+state that must survive process restarts, use a database-backed session
+service.
+
+## Create an ADK project
+
+The following commands create a new Google ADK Python project on Windows:
+
+```powershell
+mkdir adk-projects
+cd adk-projects
+
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+pip install google-adk
+adk create my_agent
+cd my_agent
+```
+
+The generated project contains:
+
+```text
+my_agent/
+  agent.py       # Agent code and the root_agent definition
+  .env           # API key or Google Cloud configuration
+  __init__.py
+```
+
+Put your API key in `.env`:
+
+```text
+GOOGLE_API_KEY=your-api-key
+```
+
+Replace `agent.py` with a minimal agent:
+
+```python
+from google.adk.agents import Agent
+
+root_agent = Agent(
+    name="my_agent",
+    model="gemini-flash-latest",
+    description="A helpful example agent.",
+    instruction="Answer the user's questions clearly and briefly.",
+)
+```
+
+Start the development web interface from the directory containing the agent
+folder:
+
+```powershell
+cd ..
+adk web
+```
+
+Open `http://localhost:8000`, select `my_agent`, and send a message. ADK Web is
+for development and debugging; use a production deployment for live services.
+
+## Run an agent in the terminal
+
+You do not need ADK Web to test an agent. From the directory that contains the
+agent folder, run:
+
+```powershell
+cd C:\path\to\adk-projects
+.venv\Scripts\Activate.ps1
+adk run my_agent
+```
+
+This starts an interactive terminal session. Type a message, press Enter, and
+type `exit` or press `Ctrl+C` to stop.
+
+To send one prompt and exit:
+
+```powershell
+adk run my_agent "What can you help me with?"
+```
+
+The agent's local session data is stored in the project's `.adk` directory by
+default. Useful options include:
+
+```powershell
+# Start with initial state
+adk run --state '{"user:display_name":"Alex"}' my_agent
+
+# Save a session to a JSON file
+adk run --save_session my_agent
+
+# Display all available options
+adk run --help
+```
 
 ### Planning parameters explained
 
